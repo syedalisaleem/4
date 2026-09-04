@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 
 from . import ffmpeg
@@ -10,8 +11,20 @@ def is_url(s):
     return isinstance(s, str) and (s.startswith("http://") or s.startswith("https://"))
 
 
+def _normalize_url(url):
+    m = re.match(r"https?://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)", url)
+    if m:
+        return "https://drive.google.com/uc?export=download&id=" + m.group(1)
+    m = re.match(r"https?://drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)", url)
+    if m:
+        return "https://drive.google.com/uc?export=download&id=" + m.group(1)
+    return url
+
+
 def download_url(url, out_dir, progress_cb):
     import yt_dlp
+
+    url = _normalize_url(url)
 
     def hook(d):
         if d.get("status") == "downloading":
@@ -20,18 +33,41 @@ def download_url(url, out_dir, progress_cb):
                 progress_cb(min(1.0, d.get("downloaded_bytes", 0) / total))
 
     opts = {
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/bestvideo[height<=1080]/best",
         "merge_output_format": "mp4",
         "outtmpl": os.path.join(out_dir, "source.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
-        "retries": 2,
+        "retries": 5,
+        "fragment_retries": 5,
         "progress_hooks": [hook],
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        },
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
+    cookies_file = os.path.join(os.path.dirname(out_dir), "..", "data", "cookies.txt")
+    if os.path.exists(cookies_file):
+        opts["cookiefile"] = cookies_file
+    else:
+        cookies_file2 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "cookies.txt")
+        if os.path.exists(cookies_file2):
+            opts["cookiefile"] = cookies_file2
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+    except Exception:
+        opts["extractor_args"] = {"youtube": {"player_client": ["web_creator", "web"]}}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+        except Exception:
+            opts.pop("extractor_args", None)
+            opts["extractor_args"] = {"youtube": {"player_client": ["mweb"]}}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
     for f in os.listdir(out_dir):
         if f.startswith("source."):
             return os.path.join(out_dir, f)

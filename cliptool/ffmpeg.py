@@ -11,6 +11,10 @@ CREATE_NO_WINDOW = 0x08000000
 _FFMPEG = None
 _FFPROBE = None
 
+_DURATION_RE = re.compile(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)")
+_VIDEO_RE = re.compile(r"Video:.*?(\d{2,5})x(\d{2,5})")
+_PROGRESS_RE = re.compile(r"out_time_ms=(\d+)")
+
 
 def ffmpeg_bin():
     global _FFMPEG
@@ -46,7 +50,7 @@ def probe(path):
         try:
             r = subprocess.run(
                 [fb, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
-                capture_output=True, text=True, timeout=90, creationflags=_flags(),
+                capture_output=True, text=True, timeout=15, creationflags=_flags(),
             )
             d = json.loads(r.stdout)
             fmt = d.get("format", {})
@@ -72,13 +76,13 @@ def probe(path):
                 }
         except Exception:
             pass
-    r = subprocess.run([ffmpeg_bin(), "-i", str(path)], capture_output=True, text=True, timeout=90, creationflags=_flags())
+    r = subprocess.run([ffmpeg_bin(), "-i", str(path)], capture_output=True, text=True, timeout=15, creationflags=_flags())
     err = r.stderr
     dur = 0.0
-    m = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", err)
+    m = _DURATION_RE.search(err)
     if m:
         dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
-    m = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", err)
+    m = _VIDEO_RE.search(err)
     w = h = 0
     if m:
         w, h = int(m.group(1)), int(m.group(2))
@@ -99,7 +103,7 @@ def run(args, progress_cb=None, duration=None):
         tail.append(line)
         if len(tail) > 30:
             tail.pop(0)
-        m = re.search(r"out_time_ms=(\d+)", line)
+        m = _PROGRESS_RE.search(line)
         if m and duration and progress_cb:
             pct = int(m.group(1)) / 1e6 / duration
             progress_cb(max(0.0, min(0.99, pct)))

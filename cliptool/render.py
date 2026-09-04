@@ -58,6 +58,8 @@ def render_clip(job, clip, out_path, preview, progress_cb):
                 clip.words, s.get("style", "pop"), W, H,
                 float(s.get("size", 1.0)), s.get("position", "bottom"),
                 shift=clip.start,
+                headline=s.get("headline_text", clip.headline),
+                headline_on=s.get("headline", True),
             ))
         filters.append("ass=%s" % esc_path(ass_path))
     args = [
@@ -68,14 +70,25 @@ def render_clip(job, clip, out_path, preview, progress_cb):
     args += [
         "-c:v", "libx264",
         "-preset", "ultrafast" if preview else "medium",
-        "-crf", "32" if preview else "19",
+        "-crf", "28" if preview else "20",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
+        "-threads", "0",
     ]
     if preview:
         args += ["-r", "24"]
+    afilters = []
+    fade_in = float(s.get("audio_fade_in", 0))
+    fade_out = float(s.get("audio_fade_out", 0))
+    if fade_in > 0:
+        afilters.append("afade=t=in:st=0:d=%.2f" % min(fade_in, clip.dur()))
+    if fade_out > 0:
+        fo = max(0, clip.dur() - min(fade_out, clip.dur()))
+        afilters.append("afade=t=out:st=%.2f:d=%.2f" % (fo, min(fade_out, clip.dur() - fo)))
     if info.get("has_audio"):
-        args += ["-c:a", "aac", "-b:a", "160k"]
+        args += ["-c:a", "aac", "-b:a", "128k"]
+        if afilters:
+            args += ["-af", ",".join(afilters)]
     else:
         args += ["-an"]
     args.append(str(out_path))

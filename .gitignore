@@ -31,12 +31,9 @@ node_modules/
 Thumbs.db
 venv/
 .venv/
-<<<<<<< HEAD
 data/
 *.mp4
 *.wav
 *.jpg
 *.onnx
 *.ass
-=======
->>>>>>> 9c5b5b0 (Initial commit)

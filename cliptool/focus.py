@@ -8,7 +8,7 @@ from . import ffmpeg
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "face_detection_yunet.onnx")
 CASCADE_PATH = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
 
-SMOOTH = 5
+SMOOTH = 7
 
 
 class FaceDetector:

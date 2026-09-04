@@ -1,6 +1,8 @@
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import download, ffmpeg, focus, pick, render, transcribe
+from . import analyze, download, ffmpeg, focus, pick, render, transcribe
 
 
 def resolve_source(job, cfg):
@@ -12,13 +14,45 @@ def resolve_source(job, cfg):
         def hook(pct):
             job.set(progress=4 + 5 * pct)
 
-        path = download.download_url(job.source, job.dir, hook)
+        try:
+            path = download.download_url(job.source, job.dir, hook)
+        except Exception as e:
+            err = str(e)
+            if "403" in err or "sign in" in err.lower() or "forbidden" in err.lower():
+                raise RuntimeError(
+                    "YouTube blocked the download (requires sign-in).\n\n"
+                    "Workaround: Download the video yourself, then use the File Upload tab "
+                    "to upload it directly (.mp4, .mov, etc.)."
+                )
+            raise
         return download.ensure_mp4(path, job.dir)
     return download.prepare_local(job.source, job.dir)
 
 
+def analyze_reference(ref_path, cfg):
+    info = ffmpeg.probe(ref_path)
+    if not info["duration"]:
+        return {}
+    wav = os.path.join(os.path.dirname(ref_path), "ref_audio.wav")
+    ffmpeg.run(["-i", ref_path, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", wav])
+    segs, words = transcribe.transcribe(wav, cfg, None)
+    if not words:
+        return {}
+    avg_words_per_sec = len(words) / max(1.0, info["duration"])
+    seg_durations = [s["end"] - s["start"] for s in segs if s["end"] > s["start"]]
+    avg_seg_dur = sum(seg_durations) / max(1, len(seg_durations))
+    return {
+        "duration": info["duration"],
+        "avg_words_per_sec": round(avg_words_per_sec, 2),
+        "avg_seg_dur": round(avg_seg_dur, 2),
+        "total_words": len(words),
+        "total_segs": len(segs),
+    }
+
+
 def run(job, mgr):
     cfg = {**mgr.config_snapshot(), **(job.options or {})}
+    t0 = time.time()
     try:
         job.set(phase="Preparing", progress=2)
         video = resolve_source(job, cfg)
@@ -27,6 +61,22 @@ def run(job, mgr):
         if not info["width"] or not info["duration"]:
             raise RuntimeError("Could not read the video file. Is it a valid video?")
         job.info = info
+
+        ref_data = {}
+        ref_url = cfg.get("reference_url", "")
+        if ref_url:
+            job.set(phase="Analyzing reference video", progress=3)
+            try:
+                ref_dir = os.path.join(job.dir, "reference")
+                os.makedirs(ref_dir, exist_ok=True)
+                def ref_hook(pct):
+                    job.set(progress=3 + 3 * pct)
+                ref_path = download.download_url(ref_url, ref_dir, ref_hook)
+                ref_path = download.ensure_mp4(ref_path, ref_dir)
+                ref_data = analyze_reference(ref_path, cfg)
+                job.reference = ref_data
+            except Exception:
+                ref_data = {}
 
         job.set(phase="Extracting audio", progress=8)
         wav = os.path.join(job.dir, "audio.wav")
@@ -53,31 +103,44 @@ def run(job, mgr):
         job.transcript = segs
         if not words:
             raise RuntimeError("No speech detected in the video. Try a video with clear speech.")
+
+        job.set(phase="Analyzing transcript quality", progress=46)
+        job.issues = analyze.detect_issues(segments=segs)
+
         job.set(phase="Finding highlight moments", progress=48)
 
-        cands = pick.pick_clips(segs, words, info["duration"], cfg)
+        cands = pick.pick_clips(segs, words, info["duration"], cfg, ref_data=ref_data)
         if not cands:
             raise RuntimeError("Could not find any highlight moments. Try a longer video or more clips.")
         job.clips = [job.new_clip(i + 1, c) for i, c in enumerate(cands)]
 
         job.set(phase="Analyzing speaker focus", progress=56)
-        for clip in job.clips:
-            focus.analyze(job, clip)
+        with ThreadPoolExecutor(max_workers=min(4, len(job.clips))) as pool:
+            futs = {pool.submit(focus.analyze, job, clip): clip for clip in job.clips}
+            for fut in as_completed(futs):
+                fut.result()
+
         n = max(1, len(job.clips))
-        for i, clip in enumerate(job.clips):
-            base = 60 + 36 * i / n
-            job.set(phase="Rendering preview %d/%d" % (i + 1, n), progress=base)
-            clip.preview.update(state="rendering", progress=0)
+        with ThreadPoolExecutor(max_workers=min(4, len(job.clips))) as pool:
+            futs = {}
+            for i, clip in enumerate(job.clips):
+                base = 60 + 36 * i / n
+                clip.preview.update(state="rendering", progress=0)
 
-            def cb(pct, c=clip, b=base):
-                c.preview["progress"] = round(100 * pct)
-                job.set(progress=b + 0.9 * pct)
+                def render_one(c=clip, b=base):
+                    def cb(pct):
+                        c.preview["progress"] = round(100 * pct)
+                    render.render_clip(job, c, c.preview_path(), True, cb)
+                    c.preview.update(state="ready", progress=100)
+                    return c
 
-            render.render_clip(job, clip, clip.preview_path(), True, cb)
-            clip.preview.update(state="ready", progress=100)
+                futs[pool.submit(render_one)] = (i, clip)
+            for fut in as_completed(futs):
+                fut.result()
 
         job.set(phase="Done", progress=100)
         job.status = "ready"
+        job.elapsed = round(time.time() - t0, 1)
     except Exception as e:
         job.status = "failed"
         job.error = str(e)

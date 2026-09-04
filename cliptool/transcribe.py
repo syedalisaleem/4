@@ -34,15 +34,21 @@ def model_cached(model):
     return (base / ("models--Systran--faster-whisper-%s" % model)).exists()
 
 
+_MODEL_CACHE = {}
+
+
 def transcribe(wav_path, cfg, progress_cb):
     from faster_whisper import WhisperModel
 
     model = cfg.get("whisper_model", "small")
     device = pick_device(cfg)
     compute = "int8" if device == "cpu" else "auto"
-    if progress_cb and not model_cached(model):
-        progress_cb(0.0, 0, "Downloading Whisper model (%s)" % model)
-    wmodel = WhisperModel(model, device=device, compute_type=compute)
+    cache_key = (model, device, compute)
+    if cache_key not in _MODEL_CACHE:
+        if progress_cb and not model_cached(model):
+            progress_cb(0.0, 0, "Downloading Whisper model (%s)" % model)
+        _MODEL_CACHE[cache_key] = WhisperModel(model, device=device, compute_type=compute)
+    wmodel = _MODEL_CACHE[cache_key]
     beam = 3 if device == "cpu" else 5
     segments, info = wmodel.transcribe(
         wav_path,

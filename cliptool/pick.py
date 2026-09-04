@@ -1,7 +1,11 @@
 import json
 import re
+import time
 
 import requests
+
+_OLLAMA_CACHE = {}
+_OLLAMA_CACHE_TTL = 30
 
 
 def _build_prompt(segments, cfg):
@@ -16,17 +20,27 @@ def _build_prompt(segments, cfg):
 Below is a timestamped transcript of a longer video. Choose the strongest %d moments to turn into vertical 9:16 clips that will perform well as standalone short-form videos.
 
 Each clip must:
-- be a complete, self-contained mini-story: a hook that lands in the first 3 seconds, then a payoff
+- be a complete, self-contained mini-story: a hook that lands in the first 1-3 seconds, then a payoff or punchline
 - be between %d and %d seconds long
 - start at the beginning of a sentence or thought, never in the middle of a word
-- avoid rambling, filler words, technical digressions and long silences
+- avoid rambling, filler words (um, uh, like, you know), technical digressions and long silences
+- contain emotionally engaging content: hot takes, strong opinions, funny moments, surprising facts, controversial statements, or clear actionable advice
 - vary across the whole video - never pick adjacent moments
+- work without context - a new viewer should understand it immediately
+
+Scoring guidelines:
+- 9-10: Incredible hook + strong payoff, would go viral
+- 7-8: Good story arc, engaging content
+- 5-6: Decent moment, could work with good editing
+- Below 5: Skip unless desperate for clips
+
+For each clip, also generate a bold headline (max 8 words) that instantly signals the topic and creates curiosity. This will be displayed as a text overlay at the top of the video.
 
 Transcript:
 %s
 
 Respond ONLY with a JSON object, no other text:
-{"clips": [{"start": 12.3, "end": 27.8, "title": "catchy title under 40 chars", "reason": "one sentence why this will perform", "score": 9}]}
+{"clips": [{"start": 12.3, "end": 27.8, "title": "catchy title under 40 chars", "headline": "bold hook text for top of video", "reason": "one sentence why this will perform", "score": 9}]}
 Use start/end in seconds as floating point numbers, score 1-10.""" % (
         k, mn, mx, "\n".join(rows)
     )
@@ -59,7 +73,7 @@ def _via_ollama(cfg, messages):
             "format": "json",
             "options": {"temperature": 0.2},
         },
-        timeout=300,
+        timeout=120,
     )
     if r.status_code != 200:
         raise RuntimeError("Ollama error %s: %s" % (r.status_code, r.text[:300]))
@@ -82,26 +96,44 @@ def _via_api(cfg, messages):
     payload = body
     if base.endswith("/v1"):
         payload = {**body, "response_format": {"type": "json_object"}}
-    r = requests.post(url, json=payload, headers=headers, timeout=300)
+    r = requests.post(url, json=payload, headers=headers, timeout=120)
     if r.status_code == 400 and payload is not body:
-        r = requests.post(url, json=body, headers=headers, timeout=300)
+        r = requests.post(url, json=body, headers=headers, timeout=120)
     if r.status_code != 200:
         raise RuntimeError("API error %s: %s" % (r.status_code, r.text[:400]))
     return _parse_json(r.json()["choices"][0]["message"]["content"])
 
 
 def _ollama_up(cfg):
+    url = cfg.get("ollama_url", "http://localhost:11434").rstrip("/") + "/api/tags"
+    now = time.time()
+    if url in _OLLAMA_CACHE and now - _OLLAMA_CACHE[url] < _OLLAMA_CACHE_TTL:
+        return True
     try:
-        r = requests.get(cfg.get("ollama_url", "http://localhost:11434").rstrip("/") + "/api/tags", timeout=3)
-        return r.status_code == 200
+        r = requests.get(url, timeout=1)
+        if r.status_code == 200:
+            _OLLAMA_CACHE[url] = now
+            return True
     except Exception:
-        return False
+        pass
+    return False
 
 
-def pick_clips(segments, words, duration, cfg):
+def pick_clips(segments, words, duration, cfg, ref_data=None):
     max_clips = max(1, min(12, int(cfg.get("max_clips", 6))))
     min_len = max(6, int(cfg.get("min_len", 12)))
     max_len = max(min_len, int(cfg.get("max_len", 45)))
+
+    if ref_data:
+        ref_dur = ref_data.get("duration", 0)
+        if ref_dur > 0:
+            ratio = duration / ref_dur
+            ref_clips = max(1, min(12, int(max_clips * ratio)))
+            max_clips = max(1, min(12, ref_clips))
+        ref_seg_dur = ref_data.get("avg_seg_dur", 0)
+        if ref_seg_dur > 0:
+            min_len = max(6, int(ref_seg_dur * 0.8))
+            max_len = max(min_len, int(ref_seg_dur * 1.5))
 
     mode = cfg.get("mode", "auto")
     if mode == "auto":
@@ -133,6 +165,7 @@ def pick_clips(segments, words, duration, cfg):
                         "start": float(c["start"]),
                         "end": float(c["end"]),
                         "title": str(c.get("title", ""))[:60],
+                        "headline": str(c.get("headline", ""))[:40],
                         "reason": str(c.get("reason", ""))[:200],
                         "score": min(10.0, max(1.0, float(c.get("score", 5)))),
                     })
@@ -185,6 +218,7 @@ def _heuristic(segments, words, max_clips, min_len, max_len):
             "start": s,
             "end": e,
             "title": "Highlight %d" % (len(picked),),
+            "headline": "Peak talking energy",
             "reason": "Peak talking energy (%.1f words/sec)." % sp["density"],
             "score": min(9.0, 5.0 + sp["density"]),
         }
