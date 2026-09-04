@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClipForge — local short-form video maker</title>
+<link rel="stylesheet" href="app.css?v=3">
+</head>
+<body>
+<nav>
+  <div class="logo">Clip<span>Forge</span></div>
+  <div class="nav-tabs">
+    <button class="tab active" data-view="create">Create</button>
+    <button class="tab" data-view="review">Review</button>
+    <button class="tab" data-view="setup">Setup</button>
+  </div>
+  <div id="nav-status" class="nav-status ok"></div>
+</nav>
+
+<main>
+  <section id="view-create" class="view active">
+    <div class="banner" id="banner" hidden></div>
+
+    <div class="card input-card">
+      <h2>New project</h2>
+      <div class="tabs">
+        <button class="tab active" data-input="file">Local video</button>
+        <button class="tab" data-input="url">YouTube link</button>
+      </div>
+
+      <div id="input-file" class="input-pane">
+        <div id="dropzone" class="dropzone">
+          <p>Drop a video here</p>
+          <p class="muted">or click to browse</p>
+          <input type="file" id="file-input" accept="video/*" hidden>
+        </div>
+        <p class="muted file-name" id="file-name"></p>
+      </div>
+
+      <div id="input-url" class="input-pane" hidden>
+        <input type="url" id="url-input" placeholder="https://www.youtube.com/watch?v=..." class="text-input">
+      </div>
+
+      <div class="options-grid">
+        <label>Whisper model
+          <select id="opt-whisper">
+            <option value="tiny">tiny (fast, less accurate)</option>
+            <option value="base">base</option>
+            <option value="small" selected>small (recommended)</option>
+            <option value="medium">medium (slow)</option>
+            <option value="large-v3">large-v3 (slowest)</option>
+          </select>
+          <span class="hint">No GPU? Use tiny/base for videos longer than ~15 min — CPU transcription is slow.</span>
+        </label>
+        <label>Max clips
+          <select id="opt-clips">
+            <option>3</option><option>4</option><option>5</option>
+            <option selected>6</option><option>8</option><option>10</option>
+          </select>
+        </label>
+        <label>Min clip length (s)
+          <select id="opt-minlen">
+            <option>8</option><option selected>12</option><option>15</option><option>20</option>
+          </select>
+        </label>
+        <label>Max clip length (s)
+          <select id="opt-maxlen">
+            <option>30</option><option selected>45</option><option>60</option><option>90</option>
+          </select>
+        </label>
+      </div>
+
+      <button class="primary" id="process-btn">Create clips</button>
+      <p class="muted" id="process-note">Clip picking uses Ollama or your API key when available, otherwise a local heuristic.</p>
+    </div>
+
+    <div class="card" id="progress-card" hidden>
+      <h2 id="progress-title"></h2>
+      <div class="progress-row">
+        <div class="bar"><div class="fill" id="progress-fill"></div></div>
+        <span class="progress-pct" id="progress-pct"></span>
+      </div>
+      <p class="muted" id="progress-phase"></p>
+      <p class="muted" id="progress-elapsed"></p>
+      <p class="error" id="progress-error" hidden></p>
+      <button class="primary" id="open-review-btn" hidden>Open in Review</button>
+    </div>
+
+    <div class="card" id="history-card">
+      <h2>Recent projects</h2>
+      <div id="history-list" class="history-list"></div>
+      <p class="muted empty" id="history-empty">Nothing yet.</p>
+    </div>
+  </section>
+
+  <section id="view-review" class="view">
+    <div class="card review-head">
+      <div class="review-head-row">
+        <div>
+          <h2 id="review-title"></h2>
+          <p class="muted" id="review-meta"></p>
+        </div>
+        <div class="review-actions">
+          <button class="ghost" id="back-btn">← New project</button>
+          <button class="primary" id="export-all-btn">Export selected</button>
+        </div>
+      </div>
+      <div class="progress-row slim" id="review-progress-row" hidden>
+        <div class="bar"><div class="fill" id="review-progress-fill"></div></div>
+        <span class="progress-pct" id="review-progress-pct"></span>
+      </div>
+      <p class="error" id="review-error" hidden></p>
+      <details id="transcript-box">
+        <summary>Transcript</summary>
+        <ol id="transcript-list"></ol>
+      </details>
+    </div>
+    <div id="clips-grid" class="clips-grid"></div>
+  </section>
+
+  <section id="view-setup" class="view">
+    <div class="card">
+      <h2>Local setup check</h2>
+      <div id="checks"></div>
+    </div>
+    <div class="card">
+      <h2>Clip picking AI</h2>
+      <p class="muted">Choose how highlight moments are picked. Everything runs on this machine — nothing is uploaded anywhere.</p>
+      <div class="options-grid">
+        <label>Mode
+          <select id="cfg-mode">
+            <option value="auto">Auto (API key → Ollama → heuristic)</option>
+            <option value="api">API key (OpenAI-compatible)</option>
+            <option value="ollama">Ollama (fully offline)</option>
+            <option value="heuristic">Heuristic (no AI, fully offline)</option>
+          </select>
+        </label>
+        <label>Whisper model
+          <select id="cfg-whisper">
+            <option value="tiny">tiny</option>
+            <option value="base">base</option>
+            <option value="small">small</option>
+            <option value="medium">medium</option>
+            <option value="large-v3">large-v3</option>
+          </select>
+        </label>
+        <label>Device
+          <select id="cfg-device">
+            <option value="auto">auto</option>
+            <option value="cpu">cpu</option>
+            <option value="cuda">cuda</option>
+          </select>
+        </label>
+      </div>
+      <h3>Ollama</h3>
+      <div class="options-grid">
+        <label>Server URL <input id="cfg-ollama-url" class="text-input"></label>
+        <label>Model <input id="cfg-ollama-model" class="text-input"></label>
+      </div>
+      <h3>API key (optional, better picks)</h3>
+      <div class="options-grid">
+        <label>Base URL <input id="cfg-api-base" class="text-input" placeholder="https://api.openai.com/v1"></label>
+        <label>Model <input id="cfg-api-model" class="text-input" placeholder="gpt-4o-mini"></label>
+        <label class="wide">API key
+          <input id="cfg-api-key" type="password" class="text-input" placeholder="sk-..." autocomplete="off">
+        </label>
+      </div>
+      <button class="primary" id="save-config-btn">Save configuration</button>
+      <p class="muted" id="config-saved" hidden>Saved.</p>
+      <p class="muted">Your API key is stored only in data/config.json on this machine. Works with OpenAI, OpenRouter, Groq, LM Studio and any OpenAI-compatible endpoint.</p>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js?v=3"></script>
+</body>
+</html>
